@@ -16,12 +16,13 @@ import (
 )
 
 type NetDog struct {
-	verbose bool
-	conn    *net.TCPConn
+	verbose         bool
+	conn            *net.TCPConn
+	transferBufsize int64
 }
 
 func New(verbose bool) (*NetDog, error) {
-	return &NetDog{verbose: verbose}, nil
+	return &NetDog{verbose: verbose, transferBufsize: 4096}, nil
 }
 
 func (dog *NetDog) ConnectToPeer(hostname string, port uint16) error {
@@ -39,7 +40,20 @@ func (dog *NetDog) ConnectToPeer(hostname string, port uint16) error {
 	return nil
 }
 
+func uniqueSliceElements[T comparable](inputSlice []T) []T {
+	uniqueSlice := make([]T, 0, len(inputSlice))
+	seen := make(map[T]bool, len(inputSlice))
+	for _, element := range inputSlice {
+		if !seen[element] {
+			uniqueSlice = append(uniqueSlice, element)
+			seen[element] = true
+		}
+	}
+	return uniqueSlice
+}
+
 func (dog *NetDog) TransferFile(files []string) error {
+	files = uniqueSliceElements(files)
 	var headers GroupFileHeader
 	for _, file := range files {
 		fmt.Println("[+] Sending file " + file)
@@ -79,6 +93,28 @@ func (dog *NetDog) TransferFile(files []string) error {
 		return err
 	}
 
+	// wait for acception
+	buf := make([]byte, 2)
+	_, err = io.ReadFull(dog.conn, buf)
+	if err != nil {
+		return err
+	}
+	if string(buf) != "OK" {
+		return errors.New("failed to receive OK from server")
+	}
+
+	// transfer file
+	for _, file := range files {
+		fileHandle, err := os.Open(file)
+		if err != nil {
+			return err
+		}
+		defer fileHandle.Close()
+		_, err = io.Copy(dog.conn, fileHandle)
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -158,6 +194,75 @@ func (dog *NetDog) HandlePeerConnection(conn *net.TCPConn) {
 	// begin transfer
 	conn.Write([]byte("OK"))
 
+	hasher := sha256.New()
+	buf = make([]byte, dog.transferBufsize)
+	// receive file
+	for _, fileHeader := range headers.Files {
+		// todo: what if the file name already exists?
+		// and what if the filename is a path? i.e., a/b/c.txt
+		fileHandle, err := os.Create(fileHeader.Filename)
+		if err != nil {
+			log.Fatalln(conn.RemoteAddr(), err)
+			return
+		}
+		defer fileHandle.Close()
+
+		n_chunks := int(fileHeader.Filesize / dog.transferBufsize)
+		for i := 0; i < n_chunks; i++ {
+			nbytes, err := io.ReadFull(conn, buf)
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					break
+				} else {
+					log.Fatalln(conn.RemoteAddr(), err)
+					return
+				}
+			}
+			n_written, err := fileHandle.Write(buf)
+			hasher.Write(buf)
+			if err != nil {
+				log.Fatalln(conn.RemoteAddr(), err)
+				return
+			}
+			if n_written != nbytes {
+				log.Fatalln(conn.RemoteAddr(), "failed to write all bytes to file")
+				return
+			}
+		}
+
+		// handle remaining bytes
+		bytesToWrite := fileHeader.Filesize - int64(n_chunks)*dog.transferBufsize
+
+		if bytesToWrite > 0 {
+			remainingBuf := make([]byte, bytesToWrite)
+			_, err := io.ReadFull(conn, remainingBuf)
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					break
+				} else {
+					log.Fatalln(conn.RemoteAddr(), err)
+					return
+				}
+			}
+
+			n_written, err := fileHandle.Write(remainingBuf)
+			hasher.Write(remainingBuf)
+			if err != nil {
+				log.Fatalln(conn.RemoteAddr(), err)
+				return
+			}
+			if n_written != int(bytesToWrite) {
+				log.Fatalln(conn.RemoteAddr(), "failed to write all bytes to file")
+				return
+			}
+		}
+
+		receivedChecksum := hex.EncodeToString(hasher.Sum(nil))
+		if receivedChecksum != fileHeader.Checksum {
+			log.Fatalln(conn.RemoteAddr(), "checksum mismatch for file ", fileHeader.Filename)
+			return
+		}
+	}
 }
 
 func (dog *NetDog) v(msg string) {
