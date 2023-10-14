@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package netdog;
+option go_package = "./netdog";
+
+message FileHeader {
+    string filename = 1;
+    int64 filesize = 2;
+    string checksum = 3;
+    string checksum_algo = 4;
+}
+
+message GroupFileHeader {
+    repeated FileHeader files = 1;
+}

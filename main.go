@@ -7,7 +7,7 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/shinohara-rin/netdog/netdog"
+	"github.com/shinohara-rin/netdog/internal/netdog"
 )
 
 func getPort(portstr string) uint16 {
@@ -30,7 +30,7 @@ func main() {
 	flag.BoolVar(&verbose, "v", false, "verbose")
 	flag.Parse()
 
-	dog, err := netdog.New()
+	dog, err := netdog.New(verbose)
 	if err != nil {
 		log.Fatalln(err)
 		os.Exit(-1)
@@ -42,6 +42,14 @@ func main() {
 	} else {
 		hostname = flag.Arg(0)
 		port = getPort(flag.Arg(1))
-		dog.ConnectToPeer(hostname, port)
+		err := dog.ConnectToPeer(hostname, port)
+		if err != nil {
+			fmt.Println(err)
+		}
+		args := flag.Args()
+		err = dog.TransferFile(args[2:])
+		if err != nil {
+			fmt.Println(err)
+		}
 	}
 }
