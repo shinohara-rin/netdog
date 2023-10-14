@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"google.golang.org/protobuf/proto"
@@ -52,15 +53,87 @@ func uniqueSliceElements[T comparable](inputSlice []T) []T {
 	return uniqueSlice
 }
 
+func isDirectory(path string) (bool, error) {
+	fileInfo, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+
+	return fileInfo.IsDir(), err
+}
+
+func handleDir(dirpath string) ([]string, *GroupFileHeader, error) {
+	var headers GroupFileHeader
+	var files []string
+	dir, err := os.ReadDir(dirpath)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, dirEntry := range dir {
+		entryName := dirpath + "/" + dirEntry.Name()
+		if dirEntry.IsDir() {
+			subfiles, subHeaders, err := handleDir(entryName)
+			if err != nil {
+				return nil, nil, err
+			}
+			headers.Files = append(headers.Files, subHeaders.Files...)
+			files = append(files, subfiles...)
+			continue
+		}
+
+		fileHandle, err := os.Open(entryName)
+		if err != nil {
+			return nil, nil, err
+		}
+		defer fileHandle.Close()
+		fileInfo, err := fileHandle.Stat()
+		if err != nil {
+			return nil, nil, err
+		}
+		fileSize := fileInfo.Size()
+		fileName := entryName
+		checksum, err := CalculateChecksum(fileHandle)
+		if err != nil {
+			return nil, nil, err
+		}
+		fmt.Printf("file: %s, size: %d, checksum: %s\n", fileName, fileSize, checksum)
+		fileTransferInfo := FileHeader{
+			Filename:     fileName,
+			Filesize:     fileSize,
+			Checksum:     checksum,
+			ChecksumAlgo: "sha256sum",
+		}
+		headers.Files = append(headers.Files, &fileTransferInfo)
+		files = append(files, fileName)
+	}
+
+	return files, &headers, nil
+}
+
 func (dog *NetDog) TransferFile(files []string) error {
 	files = uniqueSliceElements(files)
 	var headers GroupFileHeader
+	var allFiles []string
 	for _, file := range files {
 		fmt.Println("[+] Sending file " + file)
+		if isDir, err := isDirectory(file); err != nil {
+			return err
+		} else if isDir {
+			// get all files in directory
+			dirFiles, dirHeaders, err := handleDir(file)
+			if err != nil {
+				return err
+			}
+			headers.Files = append(headers.Files, dirHeaders.Files...)
+			allFiles = append(allFiles, dirFiles...)
+			continue
+		}
+
 		fileHandle, err := os.Open(file)
 		if err != nil {
 			return err
 		}
+		allFiles = append(allFiles, file)
 		defer fileHandle.Close()
 		fileInfo, err := fileHandle.Stat()
 		if err != nil {
@@ -104,7 +177,7 @@ func (dog *NetDog) TransferFile(files []string) error {
 	}
 
 	// transfer file
-	for _, file := range files {
+	for _, file := range allFiles {
 		fileHandle, err := os.Open(file)
 		if err != nil {
 			return err
@@ -194,12 +267,16 @@ func (dog *NetDog) HandlePeerConnection(conn *net.TCPConn) {
 	// begin transfer
 	conn.Write([]byte("OK"))
 
-	hasher := sha256.New()
 	buf = make([]byte, dog.transferBufsize)
 	// receive file
 	for _, fileHeader := range headers.Files {
+		hasher := sha256.New()
 		// todo: what if the file name already exists?
 		// and what if the filename is a path? i.e., a/b/c.txt
+		dog.v("Receiving file: " + fileHeader.Filename)
+		if filepath.Dir(fileHeader.Filename) != "." {
+			os.MkdirAll(filepath.Dir(fileHeader.Filename), 0755)
+		}
 		fileHandle, err := os.Create(fileHeader.Filename)
 		if err != nil {
 			log.Fatalln(conn.RemoteAddr(), err)
