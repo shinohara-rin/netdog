@@ -110,9 +110,46 @@ func handleDir(dirpath string) ([]string, *GroupFileHeader, error) {
 	return files, &headers, nil
 }
 
+func (dog *NetDog) TransferIOReader(r io.Reader) error {
+	var headers GroupFileHeader
+	headers.Type = "stream"
+	data, err := proto.Marshal(&headers)
+	if err != nil {
+		return err
+	}
+	dog.v("Sending file header")
+	binary.Write(dog.conn, binary.BigEndian, uint32(len(data)))
+	_, err = dog.conn.Write(data)
+	if err != nil {
+		return err
+	}
+
+	// wait for acception
+	buf := make([]byte, 2)
+	_, err = io.ReadFull(dog.conn, buf)
+	if err != nil {
+		return err
+	}
+	if string(buf) != "OK" {
+		return errors.New("failed to receive OK from server")
+	}
+
+	// transfer io reader
+	_, err = io.Copy(dog.conn, r)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (dog *NetDog) TransferStdin() error {
+	return dog.TransferIOReader(os.Stdin)
+}
+
 func (dog *NetDog) TransferFile(files []string) error {
 	files = uniqueSliceElements(files)
 	var headers GroupFileHeader
+	headers.Type = "files"
 	var allFiles []string
 	for _, file := range files {
 		fmt.Println("[+] Sending file " + file)
@@ -255,6 +292,22 @@ func (dog *NetDog) HandlePeerConnection(conn *net.TCPConn) {
 	err = proto.Unmarshal(buf, &headers)
 	if err != nil {
 		log.Fatalln(conn.RemoteAddr(), err)
+		return
+	}
+
+	if headers.Type == "stream" {
+		dog.v("Receiving stream")
+		// begin transfer
+		conn.Write([]byte("OK"))
+		// receive stream
+		_, err := io.Copy(os.Stdout, conn)
+		if err != nil {
+			log.Fatalln(conn.RemoteAddr(), err)
+			return
+		}
+		return
+	} else if headers.Type != "files" {
+		log.Fatalln(conn.RemoteAddr(), "unknown header type")
 		return
 	}
 

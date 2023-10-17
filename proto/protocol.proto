@@ -11,5 +11,6 @@ message FileHeader {
 }
 
 message GroupFileHeader {
-    repeated FileHeader files = 1;
+    string type = 1;
+    repeated FileHeader files = 2;
 }
