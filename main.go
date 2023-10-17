@@ -47,7 +47,11 @@ func main() {
 			fmt.Println(err)
 		}
 		args := flag.Args()
-		err = dog.TransferFile(args[2:])
+		if len(args) < 3 {
+			err = dog.TransferStdin()
+		} else {
+			err = dog.TransferFile(args[2:])
+		}
 		if err != nil {
 			fmt.Println(err)
 		}
